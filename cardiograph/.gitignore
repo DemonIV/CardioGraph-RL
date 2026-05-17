@@ -1,0 +1,6 @@
+data/raw/
+data/processed/
+models/checkpoints/
+__pycache__/
+*.pyc
+.env
