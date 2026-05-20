@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 
-def make_synthetic_batch(n_graphs=4, n_nodes=8, in_channels=48, n_edges=16):
+def make_synthetic_batch(n_graphs=4, n_nodes=8, in_channels=108, n_edges=16):
     """Sentetik PyG mini-batch."""
     import torch
     from torch_geometric.data import Data, Batch
@@ -30,7 +30,7 @@ class TestCardioGAT:
         import torch
         from models.gat import CardioGAT
         model = CardioGAT(in_channels=48, hidden=128, heads=8, num_classes=5)
-        batch = make_synthetic_batch()
+        batch = make_synthetic_batch(in_channels=48)
         logits, attn = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
         # logits: (n_graphs, 5)
         assert logits.shape == (4, 5)

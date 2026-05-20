@@ -1,10 +1,10 @@
 # AGENT: graph_agent
 """
 EKG beat dizisinden PyG graf nesnesi oluşturma.
-Giriş: data/processed/beats/beats_{id}.npy  — shape (N, 48)
+Giriş: data/processed/beats/beats_{id}.npy  — shape (N, 108)
 Çıkış: data/processed/graphs/graph_{id}.pt
 
-v2: Klinik lead korelasyon grafı.
+v3: Klinik lead korelasyon grafı — 108-dim node feature.
 NaturalVG tek-lead yerine 3 klinik grup (inferior, lateral, anterior)
 üzerinden çalışır; kenarlar union alınır.
 """
@@ -16,7 +16,7 @@ from dtaidistance import dtw
 from pathlib import Path
 
 # 12-lead sırası: I(0) II(1) III(2) aVR(3) aVL(4) aVF(5) V1(6)..V6(11)
-# Her lead 4 özellik kaplar: [lead*4 : lead*4+4]
+# Her lead 9 özellik kaplar: [lead*9 : lead*9+9]
 LEAD_GROUPS = {
     'inferior': [1, 2, 5],       # II, III, aVF
     'lateral':  [0, 4, 10, 11],  # I, aVL, V5, V6
@@ -33,8 +33,9 @@ def _beats_to_node_features(beats_array):
 
 
 def _group_scalar(node_features, lead_indices):
-    """(N, 48) → (N,) skaler: gruptaki leadlerin mean özelliği (ilk özellik = mean amplitüd)."""
-    cols = [li * 4 for li in lead_indices]
+    """(N, F) → (N,) skaler: gruptaki leadlerin ilk özelliği ortalaması. Kullanılmıyor."""
+    feat_per_lead = node_features.shape[1] // 12
+    cols = [li * feat_per_lead for li in lead_indices]
     return node_features[:, cols].mean(axis=1).astype(np.float64)
 
 
@@ -46,11 +47,9 @@ def build_clinical_graph(beats_array):
     """
     node_features = _beats_to_node_features(beats_array)  # (N, F)
 
-    # F < 12 lead sayısı × 4 özellik durumunda fallback (test senaryosu)
     n_features = node_features.shape[1]
-    n_leads = n_features // 4
-
-    feat_per_lead = n_features // 12  # 4 (48-özellik) veya 8 (96-özellik)
+    feat_per_lead = n_features // 12  # 9 (108-özellik) veya 4 (test senaryosu)
+    n_leads = 12 if feat_per_lead > 0 else n_features
 
     all_edges = set()
     for group_name, lead_indices in LEAD_GROUPS.items():

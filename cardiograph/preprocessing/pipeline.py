@@ -2,7 +2,7 @@
 """
 EKG sinyal önişleme pipeline.
 Giriş: wfdb kayıt yolu
-Çıkış: data/processed/beats/beats_{id}.npy — shape (N_beats, 12)
+Çıkış: data/processed/beats/beats_{id}.npy — shape (N_beats, 108)
 """
 import numpy as np
 import wfdb
@@ -13,7 +13,15 @@ from pathlib import Path
 
 SAMPLING_RATE = 500
 BEAT_WINDOW = 200
-N_FEATURES = 96  # 12 lead × 8 özellik (mean, std, skewness, peak_to_peak, kurtosis, rms, zcr, spectral_centroid)
+N_FEATURES = 108  # 12 lead × 9 özellik
+
+# Özellik sırası per lead (9):
+#   0: mean  1: std  2: skewness  3: kurtosis  4: peak_to_peak
+#   5: spectral_centroid  6: zero_crossings  7: ST_elevation  8: Q_wave
+
+# ST ve Q için R-peak'e göreli pencere sabit hesaplama (ecg_delineate YOK)
+_ST_OFFSET_MS  = 120   # R + 120ms → J noktası tahmini (~R+40ms) + 80ms
+_QW_ONSET_MS   = 30    # R - 30ms : R → Q dalgası arama penceresi
 
 
 def bandpass_filter(signal, fs=SAMPLING_RATE):
@@ -21,10 +29,8 @@ def bandpass_filter(signal, fs=SAMPLING_RATE):
     sos = butter(4, [0.5, 40.0], btype='bandpass', fs=fs, output='sos')
 
     def _filt(x):
-        # wrap padding: filter settling için sinyal uzatılır,
-        # sonra orijinal bölge kesilir
         n = len(x)
-        pad = min(n - 1, int(2 * fs))  # en fazla 2 saniyelik padding
+        pad = min(n - 1, int(2 * fs))
         p = np.pad(x, pad, mode='wrap')
         return sosfiltfilt(sos, p)[pad:pad + n]
 
@@ -54,22 +60,52 @@ def segment_beats(signal, r_peaks):
 
 
 def extract_morphology(beat, rr_intervals, beat_idx, fs=SAMPLING_RATE):
-    """96 boyutlu özellik: 12 lead × [mean, std, skewness, peak_to_peak, kurtosis, rms, zcr, spectral_centroid]."""
-    n_leads = beat.shape[1]
+    """
+    108-dim özellik: 12 lead × 9 özellik.
+
+    Per lead sırası:
+      [0] mean          [1] std           [2] skewness     [3] kurtosis
+      [4] peak_to_peak  [5] energy        [6] zero_crossings
+      [7] ST_elevation  [8] Q_wave
+
+    ST ve Q, R-peak'e (beat merkezi) göreli sabit offset ile hesaplanır.
+    ecg_delineate kullanılmaz — her beat'te deterministik çalışır.
+    """
+    n_samples = beat.shape[0]
+    n_leads   = beat.shape[1]
+    r_idx     = n_samples // 2                      # R-peak beat penceresinin tam merkezinde
+
+    st_sample = r_idx + int(_ST_OFFSET_MS * fs / 1000)   # R + 120ms
+    qw_lo     = r_idx - int(_QW_ONSET_MS  * fs / 1000)   # R - 30ms
+    qw_hi     = r_idx                                      # R
+
     feats = []
     for lead in range(n_leads):
         seg = beat[:, lead].astype(np.float64)
+
+        # ── 7 istatistiksel özellik ──────────────────────────────────────
         mean_v = float(np.mean(seg))
         std_v  = float(np.std(seg))
-        skew_v = float(scipy_skew(seg)) if len(seg) > 2 else 0.0
-        p2p_v  = float(np.max(seg) - np.min(seg))
+        skew_v = float(scipy_skew(seg))     if len(seg) > 2 else 0.0
         kurt_v = float(scipy_kurtosis(seg)) if len(seg) > 3 else 0.0
-        rms_v  = float(np.sqrt(np.mean(seg ** 2)))
-        zcr_v  = float(np.sum(np.diff(np.sign(seg)) != 0) / max(len(seg), 1))
+        p2p_v  = float(np.max(seg) - np.min(seg))
         freqs  = np.fft.rfftfreq(len(seg), d=1.0 / fs)
         power  = np.abs(np.fft.rfft(seg)) ** 2
         sc_v   = float(np.sum(freqs * power) / (np.sum(power) + 1e-8))
-        feats.extend([mean_v, std_v, skew_v, p2p_v, kurt_v, rms_v, zcr_v, sc_v])
+        zcr_v  = float(np.sum(np.diff(np.sign(seg)) != 0) / max(len(seg) - 1, 1))
+
+        # ── 2 klinik özellik (R-peak'e göreli, ecg_delineate YOK) ───────
+        st_elev = float(seg[st_sample]) if 0 <= st_sample < n_samples else 0.0
+
+        lo = max(0, qw_lo)
+        if lo < qw_hi:
+            min_val = float(np.min(seg[lo:qw_hi]))
+            q_wave  = min_val if min_val < 0.0 else 0.0
+        else:
+            q_wave = 0.0
+
+        feats.extend([mean_v, std_v, skew_v, kurt_v, p2p_v, sc_v, zcr_v,
+                      st_elev, q_wave])
 
     feat = np.array(feats, dtype=np.float32)
     return np.nan_to_num(feat, nan=0.0, posinf=0.0, neginf=0.0)

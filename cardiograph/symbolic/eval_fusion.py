@@ -19,7 +19,7 @@ from sklearn.metrics import f1_score, classification_report
 
 from models.gat import CardioGAT
 from symbolic.classifier import SymbolicClassifier, CLASS_ORDER
-from symbolic.fusion import NeuralSymbolicFusion
+from symbolic.fusion import NeuralSymbolicFusion, AdaptiveFusion, learn_alphas
 
 BASE          = Path(__file__).parent.parent
 GRAPHS_DIR    = BASE / "data" / "processed" / "graphs"
@@ -98,7 +98,7 @@ def main():
     x_mean = ckpt["x_mean"].to(DEVICE)
     x_std  = ckpt["x_std"].to(DEVICE)
 
-    model = CardioGAT().to(DEVICE)
+    model = CardioGAT(in_channels=108).to(DEVICE)
     model.load_state_dict(ckpt["model_state"])
 
     # Normalizasyon (veriler üzerinde in-place)
@@ -138,15 +138,58 @@ def main():
         if vf1 > best["val_f1"]:
             best = {"alpha": alpha, "val_f1": vf1, "mi_f1": vmi, "test_f1": tf1}
 
-    print(f"\nEn iyi alpha: {best['alpha']} → val_f1={best['val_f1']:.4f}, MI_f1={best['mi_f1']:.4f}")
+    print(f"\nEn iyi global alpha: {best['alpha']} → val_f1={best['val_f1']:.4f}, MI_f1={best['mi_f1']:.4f}")
 
-    # En iyi alpha için detaylı rapor
+    # En iyi global alpha için detaylı rapor
     print(f"\n{'='*55}")
-    print(f"Detaylı rapor (alpha={best['alpha']}):")
+    print(f"Detaylı rapor (global alpha={best['alpha']}):")
     fusion = NeuralSymbolicFusion(alpha=best["alpha"])
     fused  = fusion.fuse_batch(gat_val_p, sym_val_p)
     preds  = fused.argmax(axis=1)
     print(classification_report(val_labels, preds, target_names=CLASS_NAMES, zero_division=0))
+
+    # ── Per-class adaptive fusion ────────────────────────────────────────────
+    print(f"\n{'='*55}")
+    print("Per-class adaptive fusion öğreniliyor (LBFGS, val set)...")
+    learned = learn_alphas(gat_val_p, sym_val_p, val_labels)
+    print(f"Öğrenilen alpha'lar:")
+    for name, a in zip(CLASS_NAMES, learned):
+        print(f"  {name}: {a:.4f}")
+
+    af = AdaptiveFusion(alphas=learned, class_names=CLASS_NAMES)
+
+    # Val değerlendirme
+    af_val_fused  = af.fuse_batch(gat_val_p, sym_val_p)
+    af_val_preds  = af_val_fused.argmax(axis=1)
+    af_val_f1     = f1_score(val_labels,  af_val_preds,  average="macro", zero_division=0)
+    af_val_mi_f1  = f1_score(val_labels,  af_val_preds,  labels=[1], average="macro", zero_division=0)
+
+    # Test değerlendirme
+    af_test_fused = af.fuse_batch(gat_test_p, sym_test_p)
+    af_test_preds = af_test_fused.argmax(axis=1)
+    af_test_f1    = f1_score(test_labels, af_test_preds, average="macro", zero_division=0)
+    af_test_mi_f1 = f1_score(test_labels, af_test_preds, labels=[1], average="macro", zero_division=0)
+
+    print(f"\n{'Yöntem':<22} | {'val_f1':>7} | {'val_MI':>7} | {'test_f1':>8} | {'test_MI':>8}")
+    print("-" * 65)
+    print(f"{'GAT baseline':<22} | {val_f1_gat:>7.4f} | {val_mi_gat:>7.4f} | {test_f1_gat:>8.4f} | {'—':>8}")
+    print(f"{'Global alpha=' + str(best['alpha']):<22} | {best['val_f1']:>7.4f} | {best['mi_f1']:>7.4f} | {best['test_f1']:>8.4f} | {'—':>8}")
+    print(f"{'AdaptiveFusion':<22} | {af_val_f1:>7.4f} | {af_val_mi_f1:>7.4f} | {af_test_f1:>8.4f} | {af_test_mi_f1:>8.4f}")
+
+    delta_val  = af_val_f1  - best["val_f1"]
+    delta_mi   = af_val_mi_f1 - best["mi_f1"]
+    delta_test = af_test_f1 - best["test_f1"]
+    print(f"\nAdaptiveFusion delta: val_f1={delta_val:+.4f}  MI_f1={delta_mi:+.4f}  test_f1={delta_test:+.4f}")
+
+    print(f"\n{'='*55}")
+    print("Detaylı rapor (AdaptiveFusion, val):")
+    print(classification_report(val_labels, af_val_preds, target_names=CLASS_NAMES, zero_division=0))
+
+    # Checkpoint dizinine kaydet
+    ckpt_dir = BASE / "models" / "checkpoints"
+    alpha_path = ckpt_dir / "adaptive_alphas.npy"
+    af.save(alpha_path)
+    print(f"Adaptive alpha'lar kaydedildi: {alpha_path}")
 
 
 if __name__ == "__main__":

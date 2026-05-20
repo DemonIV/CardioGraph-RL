@@ -2,6 +2,31 @@
 
 EKG sinyalinden kalp ritim bozukluğu (aritmi) tespit eden, kararlarını Türkçe açıklayan açıklanabilir yapay zeka sistemi.
 
+## Hızlı Başlangıç
+
+Tüm komutlar `cardiograph/` dizininden çalıştırılır:
+
+```bash
+cd cardiograph
+```
+
+| Amaç | Komut |
+|---|---|
+| Streamlit demo arayüzü | `streamlit run demo/app.py --server.port 8050` |
+| FastAPI REST servisi | `uvicorn demo.api:app --port 8000 --reload` |
+| Tüm testleri çalıştır | `pytest tests/ -q --tb=short` |
+| Veri indirme | `python data/raw/ptbxl/example_physionet.py` |
+| Beat segmentasyonu | `python tools/build_beats.py` |
+| Graf oluşturma | `python tools/build_graphs.py` |
+| Model eğitimi | `python models/train.py` |
+| Kalibrasyon | `python eval/calibrate.py` |
+| Değerlendirme raporu | `python eval/eval_report.py` |
+
+- Streamlit: `http://localhost:8050`
+- FastAPI: `http://localhost:8000` — API dokümantasyonu: `http://localhost:8000/docs`
+
+---
+
 ## Genel Bakış
 
 Standart derin öğrenme modelleri "kara kutu"dur — neden belirli bir tanı koyduğunu açıklayamazlar. CardioGraph-RL, 5 özgün katmanı birleştirerek hem yüksek doğruluk hem de klinik açıklanabilirlik sağlar.

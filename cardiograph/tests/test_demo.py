@@ -13,7 +13,19 @@ BASE = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE))
 
 CHECKPOINT = BASE / "models" / "checkpoints" / "best_model.pt"
-checkpoint_exists = CHECKPOINT.exists()
+
+def _checkpoint_compatible():
+    """Checkpoint var ve 108-dim özelliklerle uyumlu mu?"""
+    if not CHECKPOINT.exists():
+        return False
+    try:
+        import torch
+        ckpt = torch.load(str(CHECKPOINT), weights_only=False)
+        return ckpt.get("x_mean", None) is not None and ckpt["x_mean"].shape[0] == 108
+    except Exception:
+        return False
+
+checkpoint_exists = _checkpoint_compatible()
 
 
 # ── Sabitler ──────────────────────────────────────────────────────────────────
@@ -31,9 +43,9 @@ class TestDemoConstants:
             assert c in CLASS_NAMES_TR, f"{c} için Türkçe karşılık eksik"
 
     def test_alpha_value(self):
-        """Sembolik füzyon alpha=0.35 (proje kararı)."""
+        """Sembolik füzyon alpha=0.10 (eval_fusion grid search ile doğrulandı)."""
         from demo.pipeline import ALPHA
-        assert ALPHA == 0.35
+        assert ALPHA == 0.10
 
     def test_temperature_default(self):
         """Varsayılan T=1.0256 (temperature.pt yoksa fallback)."""
@@ -107,16 +119,16 @@ class TestAttentionNormalization:
 
 class TestGraphBuilding:
     def test_node_features_shape(self):
-        """96-dim beats → düğüm özellik matrisi (N, 96)."""
+        """108-dim beats → düğüm özellik matrisi (N, 108)."""
         from graph.builder import build_clinical_graph
-        beats = np.random.randn(10, 96).astype(np.float32)
+        beats = np.random.randn(10, 108).astype(np.float32)
         edge_index, node_features = build_clinical_graph(beats)
-        assert node_features.shape == (10, 96)
+        assert node_features.shape == (10, 108)
 
     def test_edge_index_shape(self):
         """edge_index (2, E) boyutunda, en az 1 kenar."""
         from graph.builder import build_clinical_graph
-        beats = np.random.randn(10, 96).astype(np.float32)
+        beats = np.random.randn(10, 108).astype(np.float32)
         edge_index, _ = build_clinical_graph(beats)
         assert edge_index.shape[0] == 2
         assert edge_index.shape[1] > 0
@@ -124,7 +136,7 @@ class TestGraphBuilding:
     def test_dtw_weights_count_matches_edges(self):
         """DTW ağırlık sayısı kenar sayısıyla eşleşmeli."""
         from graph.builder import build_clinical_graph, compute_dtw_weights
-        beats = np.random.randn(6, 96).astype(np.float32)
+        beats = np.random.randn(6, 108).astype(np.float32)
         edge_index, _ = build_clinical_graph(beats)
         edge_attr = compute_dtw_weights(beats, edge_index)
         assert edge_attr.shape[0] == edge_index.shape[1]
@@ -132,7 +144,7 @@ class TestGraphBuilding:
     def test_dtw_weights_in_valid_range(self):
         """DTW ağırlıkları 1/(1+d) ∈ (0, 1]."""
         from graph.builder import build_clinical_graph, compute_dtw_weights
-        beats = np.random.randn(5, 96).astype(np.float32)
+        beats = np.random.randn(5, 108).astype(np.float32)
         edge_index, _ = build_clinical_graph(beats)
         edge_attr = compute_dtw_weights(beats, edge_index)
         assert float(edge_attr.min()) > 0.0
@@ -143,10 +155,10 @@ class TestGraphBuilding:
 
 class TestSymbolicOnSyntheticBeats:
     def test_predict_output_shape_and_sum(self):
-        """SymbolicClassifier 96-dim girişten (5,) olasılık üretmeli, toplam ≈ 1."""
+        """SymbolicClassifier 108-dim girişten (5,) olasılık üretmeli, toplam ≈ 1."""
         from symbolic.classifier import SymbolicClassifier
         sc   = SymbolicClassifier()
-        x    = np.random.randn(8, 96).astype(np.float32)
+        x    = np.random.randn(8, 108).astype(np.float32)
         prob = sc.predict(x)
         assert prob.shape == (5,)
         assert abs(prob.sum() - 1.0) < 1e-5
@@ -155,7 +167,7 @@ class TestSymbolicOnSyntheticBeats:
     def test_extract_clinical_features_keys(self):
         """extract_clinical_features 8 gerekli anahtarı döndürmeli."""
         from symbolic.classifier import extract_clinical_features
-        x    = np.random.randn(5, 96).astype(np.float32)
+        x    = np.random.randn(5, 108).astype(np.float32)
         feat = extract_clinical_features(x)
         required = {
             "st_elevation_mv", "q_wave_mv", "t_inversion_score",

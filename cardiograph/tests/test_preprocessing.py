@@ -8,7 +8,7 @@ import pytest
 
 SAMPLING_RATE = 500
 BEAT_WINDOW = 200
-N_FEATURES = 96  # 12 lead × 8 özellik
+N_FEATURES = 108  # 12 lead × 9 özellik (7 istatistiksel + ST_elevation + Q_wave)
 
 
 def make_synthetic_ecg(duration_s=10.0, fs=500, n_leads=12, hr_bpm=70):
@@ -117,9 +117,19 @@ class TestMorphologyExtraction:
         beat = signal[300:700, :]
         rr = np.array([750.0, 750.0])
         feat = extract_morphology(beat, rr, beat_idx=1)
-        # Her lead için peak_to_peak (index 3, 11, 19, ..., 91) ≥ 0 olmalı
-        p2p = feat[3::8]
+        # peak_to_peak: her lead'de 5. özellik (index 4), step=9
+        p2p = feat[4::9]
         assert np.all(p2p >= 0)
+
+    def test_noisy_beat_returns_valid_features(self):
+        """Gürültülü beat'te ST_elevation/Q_wave hesabı geçerli sayısal değer döndürmeli."""
+        from preprocessing.pipeline import extract_morphology
+        beat = np.random.randn(400, 12).astype(np.float32) * 0.01
+        rr = np.array([750.0])
+        feat = extract_morphology(beat, rr, beat_idx=0)
+        assert feat.shape == (N_FEATURES,)
+        assert not np.any(np.isnan(feat))
+        assert not np.any(np.isinf(feat))
 
 
 class TestFullPipeline:

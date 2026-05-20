@@ -29,29 +29,34 @@ CHECKPOINT  = BASE / "models" / "checkpoints" / "best_model.pt"
 MEMORY_PATH = BASE / "memory" / "eval_memory.json"
 DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
 CLASS_NAMES = ["NORM", "MI", "STTC", "CD", "HYP"]
-ALPHA       = 0.35
+ALPHA       = 0.10
 
 # ── Klinik proxy: beat-level patoloji tespiti ─────────────────────────────────
 _LEAD_IDX = {l: i for i, l in enumerate(
     ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"]
 )}
 _STAT_IDX = {s: i for i, s in enumerate(
-    ["mean", "std", "skewness", "p2p", "kurtosis", "rms", "zcr", "sc"]
+    ["mean", "std", "skewness", "kurtosis", "peak_to_peak", "energy",
+     "zero_crossings", "ST_elevation", "Q_wave"]
 )}
 
 
-def _f(x96, lead, stat):
-    return float(x96[_LEAD_IDX[lead] * 8 + _STAT_IDX[stat]])
+def _f(x108, lead, stat):
+    return float(x108[_LEAD_IDX[lead] * 9 + _STAT_IDX[stat]])
 
 
-def beat_is_pathological(x96: np.ndarray) -> int:
+def beat_is_pathological(x108: np.ndarray) -> int:
     """Beat-level patoloji proxy.
+    Artık gerçek delineation ölçümleri kullanılıyor.
     ST elevasyonu, patolojik Q dalgası veya T inversiyonu → 1.
     """
-    st_elev = max(_f(x96, "V2", "mean"), _f(x96, "V3", "mean"), _f(x96, "V4", "mean"))
-    q_wave  = min(_f(x96, "II", "mean"), _f(x96, "III", "mean"), _f(x96, "aVF", "mean"))
-    t_inv   = min(_f(x96, "V3", "skewness"), _f(x96, "V4", "skewness"), _f(x96, "V5", "skewness"))
-    return int(st_elev > 0.15 or q_wave < -0.10 or t_inv < -1.5)
+    st_elev = max(_f(x108, "V2", "ST_elevation"), _f(x108, "V3", "ST_elevation"),
+                  _f(x108, "V4", "ST_elevation"))
+    q_wave  = min(_f(x108, "II", "Q_wave"), _f(x108, "III", "Q_wave"),
+                  _f(x108, "aVF", "Q_wave"))
+    t_inv   = min(_f(x108, "V3", "ST_elevation"), _f(x108, "V4", "ST_elevation"),
+                  _f(x108, "V5", "ST_elevation"))
+    return int(st_elev > 0.15 or q_wave < -0.10 or t_inv < -0.10)
 
 
 # ── Attention aggregation ──────────────────────────────────────────────────────
@@ -100,15 +105,15 @@ def compute_faithfulness(model, test_data_orig, test_data_norm):
         d_dev = d_norm.to(DEVICE)
         batch = torch.zeros(d_dev.x.shape[0], dtype=torch.long, device=DEVICE)
 
-        _, attn = model(
+        _, (attn_ei, attn) = model(
             d_dev.x, d_dev.edge_index, d_dev.edge_attr, batch
         )
 
         n_nodes   = d_dev.x.shape[0]
-        node_attn = aggregate_node_attention(n_nodes, d_dev.edge_index, attn)
+        node_attn = aggregate_node_attention(n_nodes, attn_ei, attn)
 
         # Klinik proxy ile per-beat patoloji etiketleri (orijinal ölçek)
-        x_orig = d_orig.x.cpu().numpy()  # (N_beats, 96) normalize edilmemiş
+        x_orig = d_orig.x.cpu().numpy()  # (N_beats, 108) normalize edilmemiş
         patho  = np.array([beat_is_pathological(x_orig[i]) for i in range(n_nodes)])
 
         for k in [1, 3, 5]:
@@ -167,7 +172,7 @@ _LEAD_MAP = {
 
 
 def _mitbih_record_to_features(record_path: str) -> tuple:
-    """MIT-BIH kaydını PTB-XL uyumlu (N_beats, 96) özellik matrisine dönüştür.
+    """MIT-BIH kaydını PTB-XL uyumlu (N_beats, 108) özellik matrisine dönüştür.
 
     Eksik derivasyonlar sıfır ile doldurulur.
     Döndürür: (features, label) veya None.
@@ -226,7 +231,7 @@ def _mitbih_record_to_features(record_path: str) -> tuple:
 
     beats12 = segment_beats(signal12, r_peaks)
 
-    features = np.zeros((n_beats, 96), dtype=np.float32)
+    features = np.zeros((n_beats, 108), dtype=np.float32)
     for i in range(n_beats):
         rr_ctx      = rr_intervals[max(0, i - 1):i + 1] if i > 0 else rr_intervals[:1]
         features[i] = extract_morphology(beats12[i], rr_ctx, beat_idx=i, fs=fs)
@@ -326,7 +331,7 @@ def main():
     ckpt    = torch.load(str(CHECKPOINT), weights_only=False)
     x_mean  = ckpt["x_mean"].to(DEVICE)
     x_std   = ckpt["x_std"].to(DEVICE)
-    model   = CardioGAT().to(DEVICE)
+    model   = CardioGAT(in_channels=108).to(DEVICE)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 

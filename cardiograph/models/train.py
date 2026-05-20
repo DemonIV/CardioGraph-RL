@@ -29,7 +29,57 @@ PATIENCE     = 50
 GRAD_CLIP    = 1.0
 DEVICE       = 'cuda' if torch.cuda.is_available() else 'cpu'
 CLASS_NAMES  = ['NORM', 'MI', 'STTC', 'CD', 'HYP']
+N_LEADS      = 12
+MASK_PROB    = 0.3   # lead masking augmentation olasılığı
+LAMBDA_F     = 0.1   # faithfulness loss ağırlığı
+FEAT_PER_LEAD = 9    # 108 // 12
 # ──────────────────────────────────────────────────────────────
+
+
+def lead_mask_augment(x: torch.Tensor, feat_per_lead: int, p: float = MASK_PROB) -> torch.Tensor:
+    """
+    Eğitimde domain shift dayanıklılığı için lead masking augmentasyonu.
+    p olasılıkla batch'teki tüm node'larda 1-3 rastgele lead sıfırlanır.
+    Val/test'te çağrılmaz.
+    x: (N_nodes, N_leads * feat_per_lead)
+    """
+    if torch.rand(1).item() >= p:
+        return x
+    x = x.clone()
+    n_mask = torch.randint(1, 4, (1,)).item()          # 1, 2 veya 3 lead
+    leads  = torch.randperm(N_LEADS)[:n_mask]
+    for lead in leads:
+        x[:, lead * feat_per_lead : (lead + 1) * feat_per_lead] = 0.0
+    return x
+
+
+def faithful_loss(x_norm, attn, edge_index, st_thresh, q_thresh, eps=1e-8):
+    """
+    L_faithful = -log(mean attention on proxy beats + eps)
+    Proxy: ST_elevation > 0.05 OR Q_wave < -0.05 (normalized thresholds).
+    attn: (E, heads) — conv3 çıkışı.
+    """
+    # Proxy mask: herhangi bir lead'de klinik eşik aşılıyor mu?
+    proxy = torch.zeros(x_norm.shape[0], dtype=torch.bool, device=x_norm.device)
+    for lead in range(N_LEADS):
+        st_idx = lead * FEAT_PER_LEAD + 7
+        q_idx  = lead * FEAT_PER_LEAD + 8
+        proxy |= (x_norm[:, st_idx] > st_thresh[lead])
+        proxy |= (x_norm[:, q_idx]  < q_thresh[lead])
+
+    if proxy.sum() == 0:
+        return x_norm.new_tensor(0.0)
+
+    # Her node'a gelen ortalama attention (head ortalaması alınır)
+    attn_e    = attn.mean(dim=-1)           # (E,)
+    dst       = edge_index[1]               # hedef node'lar
+    node_attn = x_norm.new_zeros(x_norm.shape[0])
+    degree    = x_norm.new_zeros(x_norm.shape[0])
+    node_attn.scatter_add_(0, dst, attn_e)
+    degree.scatter_add_(0, dst, torch.ones_like(attn_e))
+    node_attn = node_attn / (degree + eps)  # degree-normalize
+
+    return -torch.log(node_attn[proxy].mean() + eps)
 
 
 class FocalLoss(nn.Module):
@@ -115,7 +165,7 @@ def evaluate(model, loader, criterion, device):
     for batch in loader:
         batch = batch.to(device)
         logits, _ = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
-        loss = criterion(logits, batch.y.squeeze())
+        loss  = criterion(logits, batch.y.squeeze())
         total_loss += loss.item() * batch.num_graphs
         all_preds.extend(logits.argmax(dim=-1).cpu().tolist())
         all_labels.extend(batch.y.squeeze().cpu().tolist())
@@ -140,6 +190,14 @@ def train_model(graphs_dir, csv_path, checkpoint_dir):
     n_feat = x_mean.shape[0]
     print(f"  Sabit ozellik sayisi (std~0): {n_const}/{n_feat} -> sifira donusturuldu")
 
+    # Faithfulness proxy eşikleri — normalized uzayda (ST>0.05, Q<-0.05)
+    st_thresh = [(0.05  - x_mean[l * FEAT_PER_LEAD + 7].item()) /
+                 x_std[l * FEAT_PER_LEAD + 7].clamp(min=1e-6).item()
+                 for l in range(N_LEADS)]
+    q_thresh  = [(-0.05 - x_mean[l * FEAT_PER_LEAD + 8].item()) /
+                 x_std[l * FEAT_PER_LEAD + 8].clamp(min=1e-6).item()
+                 for l in range(N_LEADS)]
+
     weights = compute_class_weights(train_data).to(DEVICE)
     print("  Sınıf ağırlıkları:", {n: f"{w:.3f}" for n, w in zip(CLASS_NAMES, weights.cpu())})
 
@@ -151,7 +209,9 @@ def train_model(graphs_dir, csv_path, checkpoint_dir):
     test_loader  = DataLoader(test_data,  batch_size=BATCH_SIZE, shuffle=False,
                               num_workers=0, pin_memory=pin)
 
-    model     = CardioGAT().to(DEVICE)
+    in_channels   = train_data[0].x.shape[1] if train_data else 108
+    feat_per_lead = in_channels // N_LEADS   # 108 // 12 = 9
+    model         = CardioGAT(in_channels=in_channels).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     # CosineAnnealingWarmRestarts: T_0=50 ilk döngü, T_mult=2 sonraki döngüleri ikiye katlar
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -160,6 +220,7 @@ def train_model(graphs_dir, csv_path, checkpoint_dir):
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  Eğitilebilir parametre: {n_params:,}")
+    print(f"  Lead masking: p={MASK_PROB}, 1-3 lead/batch (sadece train)")
 
     best_val_f1 = 0.0
     best_epoch  = 0
@@ -175,9 +236,13 @@ def train_model(graphs_dir, csv_path, checkpoint_dir):
 
         for batch in train_loader:
             batch = batch.to(DEVICE)
+            batch.x = lead_mask_augment(batch.x, feat_per_lead)
             optimizer.zero_grad()
-            logits, _ = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
-            loss = criterion(logits, batch.y.squeeze())
+            logits, (attn_ei, attn) = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
+            loss_ce = criterion(logits, batch.y.squeeze())
+            loss_f  = faithful_loss(batch.x, attn, attn_ei,
+                                    st_thresh, q_thresh)
+            loss = loss_ce + LAMBDA_F * loss_f
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
             optimizer.step()
@@ -194,6 +259,9 @@ def train_model(graphs_dir, csv_path, checkpoint_dir):
         marker = " ***" if val_f1 > best_val_f1 else ""
         print(f"  {epoch:3d} | {train_loss:.4f}     | {val_loss:.4f}   | "
               f"{val_f1:.4f} | {current_lr:.2e}{marker}")
+
+        if epoch % 50 == 0:
+            print(f"\n  [50-epoch özeti] epoch={epoch} | best_val_f1={best_val_f1:.4f} | lr={current_lr:.2e}\n")
 
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1

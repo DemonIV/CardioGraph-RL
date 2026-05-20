@@ -33,7 +33,7 @@ CLASS_NAMES_TR = {
 CHECKPOINT = BASE / "models" / "checkpoints" / "best_model.pt"
 TEMP_PATH  = BASE / "models" / "checkpoints" / "temperature.pt"
 DEVICE     = "cuda" if torch.cuda.is_available() else "cpu"
-ALPHA      = 0.35
+ALPHA      = 0.10
 
 _model  = None
 _scaler = None
@@ -53,7 +53,7 @@ def _load_model():
     ckpt = torch.load(str(CHECKPOINT), weights_only=False)
     _x_mean = ckpt["x_mean"].to(DEVICE)
     _x_std  = ckpt["x_std"].to(DEVICE)
-    _model = CardioGAT().to(DEVICE)
+    _model = CardioGAT(in_channels=108).to(DEVICE)
     _model.load_state_dict(ckpt["model_state"])
     _model.eval()
 
@@ -81,7 +81,7 @@ def run_inference(record_path: str) -> dict:
     """
     _load_model()
 
-    # 1. Preprocessing → beats (N, 96)
+    # 1. Preprocessing → beats (N, 108)
     with tempfile.TemporaryDirectory() as tmp:
         res = process_record(record_path, tmp)
         if res is None:
@@ -109,7 +109,7 @@ def run_inference(record_path: str) -> dict:
 
     # 4. GAT forward
     with torch.no_grad():
-        logits, attn = _model(
+        logits, (attn_ei, attn) = _model(
             batch.x, batch.edge_index, batch.edge_attr, batch.batch
         )
 
@@ -123,12 +123,12 @@ def run_inference(record_path: str) -> dict:
     clin_feats     = extract_clinical_features(node_features)
     symbolic_rules = sc.engine.query(clin_feats)
 
-    # 7. Nöro-sembolik füzyon (alpha=0.35)
+    # 7. Nöro-sembolik füzyon (alpha=0.10, eval_fusion grid search ile doğrulandı)
     fused_probs = NeuralSymbolicFusion(alpha=ALPHA).fuse(gat_probs, sym_probs)  # (5,)
 
     # 8. Beat attention → (N,) normalize edilmiş
     attn_np    = attn.cpu().numpy()                             # (E', heads)
-    ei         = batch.edge_index.cpu().numpy()                 # (2, E)
+    ei         = attn_ei.cpu().numpy()                          # (2, E') — self-loop dahil
     n_nodes    = node_features.shape[0]
     n_use      = min(ei.shape[1], attn_np.shape[0])
     attn_1d    = attn_np[:n_use].mean(axis=1)

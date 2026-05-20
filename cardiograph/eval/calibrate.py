@@ -78,7 +78,7 @@ def main():
     x_mean = ckpt["x_mean"].to(DEVICE)
     x_std  = ckpt["x_std"].to(DEVICE)
 
-    model = CardioGAT().to(DEVICE)
+    model = CardioGAT(in_channels=108).to(DEVICE)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 

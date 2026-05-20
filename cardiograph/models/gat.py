@@ -10,7 +10,7 @@ from torch_geometric.nn import GATConv, global_mean_pool
 
 
 class CardioGAT(nn.Module):
-    def __init__(self, in_channels=96, hidden=128, heads=8,
+    def __init__(self, in_channels=108, hidden=128, heads=8,
                  num_classes=5, dropout=0.3):
         super().__init__()
         self.dropout = dropout
@@ -34,7 +34,7 @@ class CardioGAT(nn.Module):
         self.input_bn = nn.BatchNorm1d(in_channels)
 
         # Residual projeksiyon: in_channels → hidden (boyut eşleştirme)
-        self.res_proj = nn.Linear(in_channels, hidden, bias=False)  # 96 → 128
+        self.res_proj = nn.Linear(in_channels, hidden, bias=False)  # 108 → 128
 
     def forward(self, x, edge_index, edge_attr, batch):
         """
@@ -58,12 +58,12 @@ class CardioGAT(nn.Module):
 
         res = x
         x = F.dropout(x, p=self.dropout, training=self.training)
-        x, (_, attn) = self.conv3(x, edge_index, edge_attr=edge_attr,
-                                   return_attention_weights=True)
+        x, (attn_edge_index, attn) = self.conv3(x, edge_index, edge_attr=edge_attr,
+                                                return_attention_weights=True)
         x = F.elu(self.bn3(x)) + res             # residual: conv2 + conv3 çıkışı
 
         x = global_mean_pool(x, batch)
         x = F.dropout(x, p=self.dropout, training=self.training)
         logits = self.lin(x)
 
-        return logits, attn
+        return logits, (attn_edge_index, attn)
